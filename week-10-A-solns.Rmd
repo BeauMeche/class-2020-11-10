@@ -1,0 +1,212 @@
+---
+title: "Week 10, Day 1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(PPBDS.data)
+library(stringr)
+library(rstanarm)
+library(tidyverse)
+library(tidymodels)
+
+# We are still working with the kenya data set. In addition to the variables we
+# used last week, we will (on Thursday) make use of the county in which the poll
+# station was located and of the block_number of that location. Check out the
+# stringr code we use to pull those variables out. Can you figure out how the
+# **stringr** code below works? Is there a better way to do it?
+
+week_10 <- kenya %>% 
+  rename(reg_chg = reg_byrv13) %>% 
+  filter(treatment %in% c("control", "local")) %>% 
+  droplevels() %>% 
+  mutate(poverty_n = (poverty - mean(poverty))/sd(poverty)) %>% 
+  mutate(county = str_replace(block, "/\\d*", "")) %>% 
+  mutate(block_number = str_extract(block, "/\\d*")) %>% 
+  mutate(block_number = str_replace(block_number, "/", "")) %>% 
+  select(county, block_number, poll_station, reg_chg, treatment, poverty_n) 
+
+```
+
+
+## Scene 1
+
+**Prompt:** How do we choose between competing models? First, we need to have a sense of what makes one model "better" than another. There is no single answer, but the most popular approach is to see how well the model's predictions match the truth.
+
+
+* Fit the same stan_glm() model which we used on Thursday: `reg_chg` as a function of `treatment`, `poverty_n` and their interaction. Look at the results. Write a sentence interpreting sigma.
+
+* The root mean square error (also known as RMSE or rmse) is the most common measure for how well a models fits the data. It is the square root of the average of the sum of the residuals squared. (Recall that the residual is defined as the true value minus the fitted value.) Calculate the RMSE by hand. (Hint: Use the `predict()` function with the fitted model object. This will give you the fitted values. Once you have the residual, you just square them, take the sum, and then take the square root of the sum.)
+
+* Write a sentence or two describing a situation in which RMSE would not be a good metric for choosing among models.
+
+
+
+```{r sc1-a}
+fit_1 <- stan_glm(reg_chg ~ treatment*poverty_n,
+                  data = week_10,
+                  refresh = 0)
+
+print(fit_1, digits = 4)
+```
+
+
+```{r sc1-b}
+tibble(truth = week_10$reg_chg, forecast = predict(fit_1)) %>% 
+  mutate(sq_diff = (forecast - truth)^2) %>% 
+  summarize(rmse = sqrt(mean(sq_diff)))
+```
+
+
+
+**Comments:** We only discussed sigma in passing when we first learned about stan_glm(). And that is OK! Sigma is not that important. But I think it is nice to see the connection between sigma and RMSE.
+
+* Why aren't they the same? Good question! There are two issues. First, by default, stan_glm() uses very diffuse priors for all the parameters. To do the calculation without any priors and using optimization rather than sampling, you need to:
+
+
+```{r sc1-comment}
+fit_1_no_prior <- stan_glm(reg_chg ~ treatment*poverty_n,
+                  prior_intercept = NULL,
+                  prior = NULL,
+                  prior_aux = NULL,
+                  algorithm = "optimizing",
+                  data = week_10,
+                  refresh = 0)
+
+print(fit_1_no_prior, digits = 4)
+```
+
+That gives exactly the same result, the MLE, as `lm()` does. In this case, it is the same as we saw with regular `stan_glm()`. This is because a) we got lucky with the sampling. Run it more times and there will be small variations. And, b) with 557 observations, a diffuse prior has little effect.
+
+The 0.0403 estimate for sigma is still different from the RMSE we calculated by hand. That brings is to the second, and more important issue. The main cause of the discrepancy, I think, comes from the difference in dividing between N and N-k. That is, `stan_glm()` and `lm()` give you an estimate for sigma which corrects for the fact that you have estimated k parameters. This creates a small, but unavoidable, amount of overfitting. Dividing by N makes sigma appear smaller than it actually is.
+
+I think that all of that detail is too much to worry about in Gov 50.
+
+* The by-hand calculation of RMSE is simple enough. Feel free to give challenge groups the job of calculating R-squared and mean absolute difference as well. The second is easy. The first requires a bit of work.
+
+* Any group going too fast should be told, at this stage, to find a better model than the one we have proposed. (Thanks to Dan for the suggestion.) 
+
+* Not sure if there will be time to discuss why we might prefer one metric over the other. The big difference between RMSE and mean absolute difference (MAD) is that the former "cares" much more about outliers because of the square in the formula. If you care about "typical" results, avoid squaring errors. The only reason we traditionally square is because it makes the math easy. We don't need math (much) anymore, so there is no good reason to prefer RSME over MAD. 
+
+* Classic example of why MAD makes more sense is when mistakes cost you in linear terms. Imagine that missing by one unit costs you \$1 and that missing by 10 units costs you \$10. In that case, the second error is 10 times more costly to you, not 100 times, which is the ratio that RMSE assumes. 
+
+* MAD SD: "the scaled standard deviations of the absolute difference between each observation and the median of all observations, is another" Primer - 2-parameters ( I think the scaled constant is ~< 2.0, but I can't recall 100%) 
+
+    * If the variable has a normal distribution, then the standard deviation and the MAD SD will be very similar. But the MAD SD is much more robust to outliers, which is why it is used here
+
+
+## Scene 2
+
+**Prompt:** Create the same model using the **tidymodels** approach. However, instead of creating a training/test split, and then using the training data for cross-validation, we will just use the whole data at once. This is, after all, what we did above. Hint: Use the Summary from Chapter 10 for guidance: https://davidkane9.github.io/PPBDS/model-choice.html#summary
+
+* Calculate RMSE again by hand. Does it match what you saw above?
+
+* Calculate RMSE using the metrics() argument.
+
+**Comments:** Point students to the Chapter 10 summary. This is the most concise guide to good coding practices. The key is to create a workflow object and then start with that object in subsequent analysis.
+
+
+```{r sc2-a}
+stan_wfl <- workflow() %>% 
+  add_recipe(recipe(reg_chg ~ treatment + poverty_n,
+                    data = week_10)) %>% 
+    step_interact(~ treatment*povert_n) %>% 
+  add_model(linear_reg() %>% 
+              set_engine("stan"))
+
+```
+
+
+```{r sc2-b}
+stan_wfl %>% 
+  fit(data = week_10) %>% 
+  predict(new_data = week_10) %>% 
+  bind_cols(week_10 %>% select(reg_chg)) %>% 
+  mutate(sq_diff = (.pred - reg_chg)^2) %>% 
+  summarize(rmse = sqrt(mean(sq_diff)))
+```
+
+
+```{r sc2-c}
+stan_wfl %>% 
+  fit(data = week_10) %>% 
+  predict(new_data = week_10) %>% 
+  bind_cols(week_10 %>% select(reg_chg)) %>% 
+  metrics(truth = reg_chg, estimate = `.pred`)
+```
+
+
+* There is nothing wrong with doing things differently. For example, some people like to create a model object and a recipe object. Then, they combine those parts to make the workflow object. Doing it that way is fine, but we should guide students toward this approach, if only because they will see it in The Primer and in the tutorials.
+
+* In practice, the big exception to this approach might be cases in which fitting the model takes a long time. If that is the case, then the above approach --- which does the same fit more than once --- would not be the best approach.
+
+* Challenge groups should make a plot as well.
+
+* The answers will not be identical because of the sampling process inherent in MCMC fitting. But they are equal through the third decimal.
+
+* Worth pointing out that RMSE and sigma, although very similar, are not exactly the same thing, as discussed above. Or, perhaps better, tell students that, in applied situations, we would never worry about any difference. As long as you are using RMSE to compare models, you are doing OK. No one cares about sigma, but lots of people (and you!) care about RMSE, and other measures which we use to choose among models.
+
+* Several of the code lines are worth discussing.
+  + You can't just put an interaction term in the formula. (There are technical reasons why that does not work.) That is why we need step_interact(~ treatment*povert_n) .
+  + bind_cols(week_10 %>% select(reg_chg)) is either elegant or overly cutesy, depending on your point of view.
+  + It is easy to get confused about what data you use to fit the model and what data you use for prediction. Sometime it is the same. Other times it is different. If you mess that choice up, the code will (sadly) still run. So, you must be careful. R won't save you.
+
+
+
+## Scene 3
+
+**Prompt:** The key problem with this analysis is that we have used the same data to *fit* the model as we are using to *evaluate* the model. This is very, very dangerous. We don't really care how well the model works on data we have already seen. We have the data itself! We care about the future, when we don't know the answer already. *The main purpose of tidymodels is to make it easy to estimate how well our model will work in the future.*
+
+* Create 4 objects: split, train, test and folds data, just as we do in chapter 10.
+
+* Using the same model as in the previous scene, use cross-validation and report the average RMSE over the assessment samples. Hint: `collect_metrics()`.
+
+* Using the same model as in the previous scene, fit the model on the training data and test it on the test data. Hint: `metrics()`. Report the RMSE. Why is it so much lower?
+
+
+**Comments:** This follows the approach in the Summary section of Chapter 10 very closely. It is also very similar to the Tutorial. As you build these pipelines, make sure that students execute them after each new line and understand/confirm the resulting output. Too often, students write 5 lines of code without checking the output of each line. Then, when they get an error, they are stymied to debug it. My advice: *Run every line as soon as your write it.*
+
+
+```{r sc3-a}
+set.seed(9)
+week_10_split <- initial_split(week_10, prob = 0.8)
+week_10_train <- training(week_10_split)
+week_10_test  <- testing(week_10_split)
+week_10_folds <- vfold_cv(week_10, v = 10)
+```
+
+
+```{r sc3-b}
+stan_wfl <- workflow() %>% 
+  add_recipe(recipe(reg_chg ~ treatment + poverty_n,
+                    data = week_10_train)) %>% 
+    step_interact(~ treatment*povert_n) %>% 
+  add_model(linear_reg() %>% 
+              set_engine("stan"))
+```
+
+
+```{r sc3-c}
+stan_wfl %>% 
+  fit_resamples(resamples = week_10_folds) %>% 
+  collect_metrics()
+```
+
+
+```{r sc3-d}
+stan_wfl %>% 
+fit(data = week_10_train) %>% 
+  predict(new_data = week_10_test) %>% 
+  bind_cols(week_10_test %>% select(reg_chg)) %>% 
+  metrics(truth = reg_chg, estimate = `.pred`)
+```
+
+* The core of every tidymodels exercise involves, first, creating a workflow. This has all the key details in it. We can then use this workflow for three tasks. The first two tasks --- examining the predictions of a single model and estimating the out-of-sample RMSE of that model --- are done over and over again, as we take a guided tour through the space of all possible models. The third use of the workflow object --- fit with training data, as usual, but predict with test data --- is done only once, at the very end of the process, after we have already selected our final model. 
+
+* We don't have enough time today to demonstrate the iterative process of the exploration of the space of possible models. But we do have enough time to highlight these two cases and make clear the difference. Key: *Only use the test data once!* (Of course, people commonly cheat. Coming up with two models that look good with cross validation and then running them both on the test data, having made the decision to pick the one which does better. This is common, but foolish -- at least if you want a good forecast of your future RMSE.) 
+
+* The reason that the RMSE is lower in the test data is, I think, random variation. Normally, we worry about the opposite effect. We do something which overfits the model. We think that the RMSE will be X. When we test it on the test data --- which we have never looked at before! --- we hope it will be about X. If we have overfit, however, the test RMSE will be bigger than X. Here, we have the opposite concern! The RMSE is too low. Again, I think this is random. We can test that conjecture by re-running the analysis with a different random number seed.
+
+
+
